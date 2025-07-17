@@ -30,7 +30,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_subcompositor, wl_subsurface, wl_buffer, wl_region},
     Connection, QueueHandle,
 };
 
@@ -70,6 +70,15 @@ fn main() {
     window.set_app_id("io.github.smithay.client-toolkit.SimpleWindow");
     window.set_min_size(Some((256, 256)));
 
+    let subcompositor = globals.bind::<wl_subcompositor::WlSubcompositor, _, _>(&qh, 1..=1, ()).unwrap();
+    let sub_surface = compositor.create_surface(&qh);
+    let subsurface = subcompositor.get_subsurface(&sub_surface, window.wl_surface(), &qh, ());
+    subsurface.set_sync();
+    subsurface.place_above(window.wl_surface());
+    let region = compositor.wl_compositor().create_region(&qh, ());
+    sub_surface.set_input_region(Some(&region));
+    region.destroy();
+
     // In order for the window to be mapped, we need to perform an initial commit with no attached buffer.
     // For more info, see WaylandSurface::commit
     //
@@ -91,7 +100,9 @@ fn main() {
 
     // We don't know how large the window will be yet, so lets assume the minimum size we suggested for the
     // initial memory allocation.
-    let pool = SlotPool::new(256 * 256 * 4, &shm).expect("Failed to create pool");
+    let mut pool = SlotPool::new(256 * 256 * 4, &shm).expect("Failed to create pool");
+
+    let buffer1x1 = pool.create_buffer(64, 64,64*4, wl_shm::Format::Argb8888).unwrap().0;
 
     let mut simple_window = SimpleWindow {
         // Seats and outputs may be hotplugged at runtime, therefore we need to setup a registry state to
@@ -114,6 +125,9 @@ fn main() {
         keyboard_focus: false,
         pointer: None,
         loop_handle: event_loop.handle(),
+        subcompositor,
+        sub_surface,
+        buffer1x1,
     };
 
     // We don't draw immediately, the configure will notify us when to first draw.
@@ -146,6 +160,9 @@ struct SimpleWindow {
     keyboard_focus: bool,
     pointer: Option<wl_pointer::WlPointer>,
     loop_handle: LoopHandle<'static, SimpleWindow>,
+    subcompositor: wl_subcompositor::WlSubcompositor,
+    sub_surface: wl_surface::WlSurface,
+    buffer1x1: Buffer,
 }
 
 impl CompositorHandler for SimpleWindow {
@@ -176,6 +193,7 @@ impl CompositorHandler for SimpleWindow {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        //println!("frame: {}", _time);
         self.draw(conn, qh);
     }
 
@@ -445,6 +463,8 @@ impl SimpleWindow {
         let height = self.height;
         let stride = self.width as i32 * 4;
 
+        let is_first = self.buffer.is_none();
+
         let buffer = self.buffer.get_or_insert_with(|| {
             self.pool
                 .create_buffer(width as i32, height as i32, stride, wl_shm::Format::Argb8888)
@@ -493,14 +513,25 @@ impl SimpleWindow {
             }
         }
 
+        //dbg!(self.shift);
+
         // Damage the entire window
-        self.window.wl_surface().damage_buffer(0, 0, self.width as i32, self.height as i32);
+        //self.window.wl_surface().damage_buffer(0, 0, self.width as i32, self.height as i32);
+        self.sub_surface.damage_buffer(0, 0, self.width as i32, self.height as i32);
 
         // Request our next frame
         self.window.wl_surface().frame(qh, self.window.wl_surface().clone());
 
         // Attach and commit to present.
-        buffer.attach_to(self.window.wl_surface()).expect("buffer attach");
+        //buffer.attach_to(self.window.wl_surface()).expect("buffer attach");
+        buffer.attach_to(&self.sub_surface).expect("buffer attach");
+        if is_first {
+            self.window.wl_surface().attach(Some(self.buffer1x1.wl_buffer()), 0, 0);
+            //self.buffer1x1.attach_to(self.window.wl_surface()).expect("buffer attach");
+            //println!("1x1");
+            //AlreadyActive
+        }
+        self.sub_surface.commit();
         self.window.commit();
     }
 }
@@ -525,3 +556,7 @@ impl ProvidesRegistryState for SimpleWindow {
     }
     registry_handlers![OutputState, SeatState,];
 }
+
+wayland_client::delegate_noop!(SimpleWindow: ignore wl_subcompositor::WlSubcompositor);
+wayland_client::delegate_noop!(SimpleWindow: ignore wl_subsurface::WlSubsurface);
+wayland_client::delegate_noop!(SimpleWindow: ignore wl_region::WlRegion);
